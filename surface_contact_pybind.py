@@ -130,6 +130,7 @@ randomObjectOrientation = randomObjectRotation.as_quat()
 
 jointPositionAnalytical = np.zeros(7, dtype=np.float64)
 
+sum = 0.0
 t = time.time()
 for i in range(NUM_SAMPLES):
     # Set position and orientation of the object
@@ -169,12 +170,15 @@ for i in range(NUM_SAMPLES):
 
     # Solve analytical IK by pybind11
     while True:
+        t1 = time.time()
         jointPositionAnalytical = franka_ik_pybind.franka_IKCC(
             handPosition[i], handOrientation[i], 
             random.uniform(-2.8973, 2.8973), initialJointPosition[:-2]
             )
         if not np.any(np.isnan(jointPositionAnalytical)): break
     jointPositionAnalytical = np.append(jointPositionAnalytical, distance[i])
+    sum += time.time() - t1
+    # print(franka_ik_pybind.franka_IK(handPosition[i], handOrientation[i], random.uniform(-2.8973, 2.8973), initialJointPosition[:-2]))
     print(jointPositionAnalytical)
 
     # pybullet.performCollisionDetection()
@@ -198,6 +202,9 @@ for i in range(NUM_SAMPLES):
     # print("=====")
     # contactPointOnFingerIK = handRotationIK.apply(contactPointOnFinger[0] + fingerPositionToHand[0]) + handPositionIK
     # print(contactPointOnFingerIK)
-print(f'{(time.time() - t) * 1000}ms')
+total_time = time.time() - t
+print("total time for 50 samples : " + f'{(total_time) * 1000} ms')
+print("pure computation time for 1 sample : " + f'{(total_time / 50) * 1000 * 1000} μs')
+print("pure computation time for 1 success : " + f'{(sum) * 1000 * 1000 / 50} μs')
 
 pybullet.disconnect()

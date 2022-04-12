@@ -19,9 +19,11 @@
 namespace py = pybind11;
 
 // inverse kinematics w.r.t. End Effector Frame (using Franka Hand data)
-std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T_EE_array,
-                                                      double q7,
-                                                      std::array<double, 7> q_actual_array )
+std::array< std::array<double, 7>, 4 > franka_IK_EE ( Eigen::Matrix3d R_EE,
+                                                    Eigen::Vector3d z_EE,
+                                                    Eigen::Vector3d p_EE,
+                                                    double q7,
+                                                    std::array<double, 7> q_actual_array )
 {
     const std::array< std::array<double, 7>, 4 > q_all_NAN = {{ {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
                                                                 {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
@@ -29,8 +31,6 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
                                                                 {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}} }};
     const std::array<double, 7> q_NAN = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
     std::array< std::array<double, 7>, 4 > q_all = q_all_NAN;
-    
-    Eigen::Map< Eigen::Matrix<double, 4, 4> > O_T_EE(O_T_EE_array.data());
     
     const double d1 = 0.3330;
     const double d3 = 0.3160;
@@ -58,9 +58,6 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
             q_all[i][6] = q7;
     
     // compute p_6
-    Eigen::Matrix3d R_EE = O_T_EE.topLeftCorner<3, 3>();
-    Eigen::Vector3d z_EE = O_T_EE.block<3, 1>(0, 2);
-    Eigen::Vector3d p_EE = O_T_EE.block<3, 1>(0, 3);
     Eigen::Vector3d p_7 = p_EE - d7e*z_EE;
     
     Eigen::Vector3d x_EE_6;
@@ -229,7 +226,9 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
 }
 
 // "Case-Consistent" inverse kinematics w.r.t. End Effector Frame (using Franka Hand data)
-std::array<double, 7> franka_IK_EE_CC ( std::array<double, 16> O_T_EE_array,
+std::array<double, 7> franka_IK_EE_CC ( Eigen::Matrix3d R_EE,
+                                        Eigen::Vector3d z_EE,
+                                        Eigen::Vector3d p_EE,
                                         double q7,
                                         std::array<double, 7> q_actual_array )
 {
@@ -237,7 +236,7 @@ std::array<double, 7> franka_IK_EE_CC ( std::array<double, 16> O_T_EE_array,
     
     std::array<double, 7> q;
     
-    Eigen::Map< Eigen::Matrix<double, 4, 4> > O_T_EE(O_T_EE_array.data());
+    // Eigen::Map< Eigen::Matrix<double, 4, 4> > O_T_EE(O_T_EE_array.data());
     
     // constants
     const double d1 = 0.3330;
@@ -317,9 +316,9 @@ std::array<double, 7> franka_IK_EE_CC ( std::array<double, 16> O_T_EE_array,
     bool is_case1_1 = (q_actual_array[1] < 0);
     
     // IK: compute p_6
-    Eigen::Matrix3d R_EE = O_T_EE.topLeftCorner<3, 3>();
-    Eigen::Vector3d z_EE = O_T_EE.block<3, 1>(0, 2);
-    Eigen::Vector3d p_EE = O_T_EE.block<3, 1>(0, 3);
+    // Eigen::Matrix3d R_EE = O_T_EE.topLeftCorner<3, 3>();
+    // Eigen::Vector3d z_EE = O_T_EE.block<3, 1>(0, 2);
+    // Eigen::Vector3d p_EE = O_T_EE.block<3, 1>(0, 3);
     Eigen::Vector3d p_7 = p_EE - d7e*z_EE;
     
     Eigen::Vector3d x_EE_6;
@@ -450,62 +449,87 @@ std::array<double, 7> franka_IK_EE_CC ( std::array<double, 16> O_T_EE_array,
     return q;
 }
 
-
-// pybind11 wrapper for franka_IK_EE_CC
-py::array_t<double> franka_IKCC(
-    py::array_t<double>& tHP, 
-                                                    py::array_t<double>& tHO, 
-                                                    double q7,
-                                                    py::array_t<double>& cP
-)
+// pybind11 wrapper for franka_IK
+py::array_t<double> franka_IK(Eigen::Ref<Eigen::MatrixXd> targetHandPosition, 
+                                py::array_t<double>& tHO, 
+                                double q7,
+                                py::array_t<double>& cP)
 {
-    py::buffer_info buf1 = tHP.request();
     py::buffer_info buf2 = tHO.request();
     py::buffer_info buf3 = cP.request();
 
-    auto result = py::array_t<double>(7);
+    auto result = py::array_t<double>(28);
+    result.resize({4, 7});
     py::buffer_info buf4 = result.request();
 
-    double* targetHandPosition = (double*)buf1.ptr;
     double* targetHandOrientation = (double*)buf2.ptr;
     double* currentPosition = (double*)buf3.ptr;
     double* ptr4 = (double*)buf4.ptr;
 
     Eigen::Quaterniond q(targetHandOrientation);
     Eigen::Matrix3d targetRotation = q.normalized().toRotationMatrix();
-    Eigen::Vector3d targetPosition(targetHandPosition[0], targetHandPosition[1], targetHandPosition[2]);
+
+    Eigen::Vector3d targetPosition = targetHandPosition;
     Eigen::Vector3d offset(0.0, 0.0, 0.1034);
-    std::array<double, 16> O_T_EE_array;
-    O_T_EE_array.fill(0.0);
-    std::array<double, 7> q_actual_array;
-    
+
     targetPosition = targetRotation * offset + targetPosition;
 
-    for (int i = 0; i < 3; i++)
-    {
-        for (int j = 0; j < 3; j++)
-        {
-            O_T_EE_array[i + 4 * j] = targetRotation(i, j);
-        }
-        O_T_EE_array[12 + i] = targetPosition(i);
-    }
-    O_T_EE_array[15] = 1.0;
-
+    std::array<double, 7> q_actual_array;
     for (int i = 0; i < 7; i++) q_actual_array[i] = currentPosition[i];
 
-    std::array<double, 7> ans = franka_IK_EE_CC(O_T_EE_array, q7, q_actual_array);
+    std::array< std::array<double, 7>, 4 > ans = franka_IK_EE(targetRotation, targetRotation.block<3, 1>(0, 2), targetPosition, q7, q_actual_array);
+
+    for (int i = 0; i < 4; i++)
+    {
+        for(int j = 0; j < 7; j++)
+        {
+            ptr4[i*7+j] = ans[i][j];
+        }
+    }
+    return result;
+}
+
+// pybind11 wrapper for franka_IK_EE_CC 
+py::array_t<double> franka_IKCC(Eigen::Ref<Eigen::MatrixXd> targetHandPosition, 
+                                py::array_t<double>& tHO, 
+                                double q7,
+                                py::array_t<double>& cP)
+{
+    py::buffer_info buf2 = tHO.request();
+    py::buffer_info buf3 = cP.request();
+
+    auto result = py::array_t<double>(7);
+    py::buffer_info buf4 = result.request();
+
+    double* targetHandOrientation = (double*)buf2.ptr;
+    double* currentPosition = (double*)buf3.ptr;
+    double* ptr4 = (double*)buf4.ptr;
+
+    Eigen::Quaterniond q(targetHandOrientation);
+    Eigen::Matrix3d targetRotation = q.normalized().toRotationMatrix();
+
+    Eigen::Vector3d targetPosition = targetHandPosition;
+    Eigen::Vector3d offset(0.0, 0.0, 0.1034);
+
+    targetPosition = targetRotation * offset + targetPosition;
+
+    std::array<double, 7> q_actual_array;
+    for (int i = 0; i < 7; i++) q_actual_array[i] = currentPosition[i];
+
+    std::array<double, 7> ans = franka_IK_EE_CC(targetRotation, targetRotation.block<3, 1>(0, 2), targetPosition, q7, q_actual_array);
 
     for (int i = 0; i < 7; i++)
     {
         ptr4[i] = ans[i];
     }
+
     return result;
 }
 
 PYBIND11_MODULE(franka_ik_pybind, m)
 {
   m.doc() = "Analytical IK";
-//   m.def("franka_IK_EE", &franka_IK_EE);
+  m.def("franka_IK", &franka_IK);
   m.def("franka_IKCC", &franka_IKCC);
 }
 
