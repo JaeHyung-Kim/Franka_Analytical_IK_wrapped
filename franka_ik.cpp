@@ -1,17 +1,26 @@
 // Analytical Franka inverse kinematics using q7 as redundant parameter
 // - Yanhao He, February 2020
 
+//c++ -O3 -Wall -shared -std=c++11 -fPIC $(python3 -m pybind11 --includes) franka_ik.cpp -o franka_ik$(python3-config --extension-suffix)
+
 #ifndef FRANKA_IK_HE_HPP
 #define FRANKA_IK_HE_HPP
 
 #include <array>
 #include <cmath>
-#include "Eigen/Dense"
+#include "/home/guest/Simulation/franka_analytical_ik/Eigen/Dense"
+// #include "eigen-3.4.0/Eigen/Dense"
+#include <pybind11/pybind11.h>
+#include <pybind11/eigen.h>
+
+
+namespace py = pybind11;
 
 // inverse kinematics w.r.t. End Effector Frame (using Franka Hand data)
-std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T_EE_array,
+std::array< std::array<double, 7>, 4 > franka_IK_EE ( const Eigen::Matrix3d &R_EE,
+                                                      const Eigen::Vector3d &p_EE,
                                                       double q7,
-                                                      std::array<double, 7> q_actual_array )
+                                                      const Eigen::Vector<double, 7> &q_actual )
 {
     const std::array< std::array<double, 7>, 4 > q_all_NAN = {{ {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
                                                                 {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
@@ -20,7 +29,7 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
     const std::array<double, 7> q_NAN = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
     std::array< std::array<double, 7>, 4 > q_all = q_all_NAN;
     
-    Eigen::Map< Eigen::Matrix<double, 4, 4> > O_T_EE(O_T_EE_array.data());
+    // Eigen::Map< Eigen::Matrix<double, 4, 4> > O_T_EE(O_T_EE_array.data());
     
     const double d1 = 0.3330;
     const double d3 = 0.3160;
@@ -48,9 +57,9 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
             q_all[i][6] = q7;
     
     // compute p_6
-    Eigen::Matrix3d R_EE = O_T_EE.topLeftCorner<3, 3>();
-    Eigen::Vector3d z_EE = O_T_EE.block<3, 1>(0, 2);
-    Eigen::Vector3d p_EE = O_T_EE.block<3, 1>(0, 3);
+    // Eigen::Matrix3d R_EE = O_T_EE.topLeftCorner<3, 3>();
+    Eigen::Vector3d z_EE = R_EE.block<3, 1>(0, 2);
+    // Eigen::Vector3d p_EE = O_T_EE.block<3, 1>(0, 3);
     Eigen::Vector3d p_7 = p_EE - d7e*z_EE;
     
     Eigen::Vector3d x_EE_6;
@@ -143,9 +152,9 @@ std::array< std::array<double, 7>, 4 > franka_IK_EE ( std::array<double, 16> O_T
         
         if (std::fabs(V2P[2]/L2P) > 0.999)
         {
-            q_all[2*i][0] = q_actual_array[0];
+            q_all[2*i][0] = q_actual(0);
             q_all[2*i][1] = 0.0;
-            q_all[2*i + 1][0] = q_actual_array[0];
+            q_all[2*i + 1][0] = q_actual(0);
             q_all[2*i + 1][1] = 0.0;
         }
         else
@@ -440,4 +449,184 @@ std::array<double, 7> franka_IK_EE_CC ( std::array<double, 16> O_T_EE_array,
     return q;
 }
 
+void franka_IK_Nearest(
+    const Eigen::Matrix3d &targetRotation,
+    const Eigen::Vector3d &targetPosition,
+    double q7,
+    const Eigen::Vector<double, 7> &currentPosition,
+    Eigen::Ref<Eigen::Vector<double, 10>> jointPosition
+)
+{
+    std::array<std::array<double, 7>, 4> resultArray = franka_IK_EE(targetRotation, targetPosition, q7, currentPosition);
+    bool feasible;
+    double minimumDistance = -1.0;
+    int index = -1;
+    for (int i = 0; i < 4; i++)
+    {
+        feasible = true;
+        for (int j = 0; j < 7; j++)
+        {
+            if (std::isnan(resultArray[i][j]))
+            {
+                feasible = false;
+                break;
+            }
+        }
+        if (!feasible) continue;
+        Eigen::Map<Eigen::Vector<double, 7>> result(resultArray[i].data());
+        double distance = (currentPosition - result).norm();
+        if ((minimumDistance < 0) || (distance < minimumDistance))
+        {
+            minimumDistance = distance;
+            index = i;
+        }
+    }
+    if (index >= 0)
+    {
+        for (int i = 0; i < 7; i++) jointPosition(i) = resultArray[index][i];
+        jointPosition(9) = 1;
+    }
+}
+
+Eigen::Vector<double, 10> franka_IK_q7(
+    Eigen::Ref<const Eigen::Vector3d> targetHandPosition, 
+    Eigen::Ref<const Eigen::Vector4d> targetHandOrientation, 
+    double width, 
+    double q7
+)
+{
+    Eigen::Quaterniond q(targetHandOrientation);
+    Eigen::Matrix3d targetRotation = q.normalized().toRotationMatrix();
+    Eigen::Vector3d offset(0.0, 0.0, 0.1034);
+    Eigen::Vector3d targetPosition = targetRotation * offset + targetHandPosition;
+    Eigen::Vector<double, 7> currentPosition = {0.0000, 0.0000, 0.0000, -0.9425, 0.0000, 1.1205, 0.0000};
+
+    std::array<std::array<double, 7>, 4> resultArray = franka_IK_EE(targetRotation, targetPosition, q7, currentPosition);
+
+    Eigen::Vector<double, 10> jointPosition;
+    jointPosition.setZero();
+
+    bool feasible;
+    double minimumDistance = -1.0;
+    int index = -1;
+    for (int i = 0; i < 4; i++)
+    {
+        feasible = true;
+        for (int j = 0; j < 7; j++)
+        {
+            if (std::isnan(resultArray[i][j]))
+            {
+                feasible = false;
+                break;
+            }
+        }
+        if (!feasible) continue;
+        Eigen::Map<Eigen::Vector<double, 7>> result(resultArray[i].data());
+        double distance = (currentPosition - result).norm();
+        if ((minimumDistance < 0) || (distance < minimumDistance))
+        {
+            minimumDistance = distance;
+            index = i;
+        }
+    }
+    if (index >= 0)
+    {
+        for (int i = 0; i < 7; i++) jointPosition(i) = resultArray[index][i];
+        jointPosition(7) = jointPosition(8) = width;
+        jointPosition(9) = 1;
+    }
+
+    return jointPosition;
+}
+
+const int SEG=100;
+
+Eigen::Vector<double, 10> franka_IK(
+    Eigen::Ref<const Eigen::Vector3d> targetHandPosition, 
+    Eigen::Ref<const Eigen::Vector4d> targetHandOrientation, 
+    double width
+)
+{
+    Eigen::Quaterniond q(targetHandOrientation);
+    Eigen::Matrix3d targetRotation = q.normalized().toRotationMatrix();
+    Eigen::Vector3d offset(0.0, 0.0, 0.1034);
+    Eigen::Vector3d targetPosition = targetRotation * offset + targetHandPosition;
+    Eigen::Vector<double, 7> currentPosition = {0.0000, 0.0000, 0.0000, -0.9425, 0.0000, 1.1205, 0.0000};
+    Eigen::Vector<double, SEG> q7Candidates = Eigen::VectorXd::LinSpaced(SEG+2, -2.8973, 2.8973)(Eigen::seq(1, SEG));
+    Eigen::Matrix<double, 10, SEG> jointPositions;
+    int i;
+    int index = -1;
+    double difference;
+    double minimumDifference = -1.0;
+
+    jointPositions.setZero();
+    for (i = 0; i < SEG; i++)
+    {
+        franka_IK_Nearest(targetRotation, targetPosition, q7Candidates(i), currentPosition, jointPositions.col(i));
+    }
+
+    for (i = 0; i < SEG; i++)
+    {
+        if (!(jointPositions(9, i) > 0)) continue;
+        difference = (currentPosition - jointPositions(Eigen::seq(0, 6), i)).norm();
+        if ((minimumDifference < 0) || (difference < minimumDifference))
+        {
+            minimumDifference = difference;
+            index = i;
+        }
+    }
+    if (index >= 0) jointPositions(7, index) = jointPositions(8, index) = width;
+    else index = 0;
+    return jointPositions.col(index);
+}
+
+Eigen::Vector<double, 10> franka_IK_2(
+    Eigen::Ref<const Eigen::Vector3d> targetHandPosition, 
+    Eigen::Ref<const Eigen::Vector4d> targetHandOrientation, 
+    double width
+)
+{
+    Eigen::Quaterniond q(targetHandOrientation);
+    Eigen::Matrix3d targetRotation = q.normalized().toRotationMatrix();
+    Eigen::Vector3d offset(0.0, 0.0, 0.1034);
+    Eigen::Vector3d targetPosition = targetRotation * offset + targetHandPosition;
+    Eigen::Vector<double, 7> currentPosition = {0.0000, 0.0000, 0.0000, -0.9425, 0.0000, 1.1205, 0.0000};
+    Eigen::Vector<double, SEG> q7Candidates = Eigen::VectorXd::LinSpaced(SEG+2, -2.8973, 2.8973)(Eigen::seq(1, SEG));
+    Eigen::Matrix<double, 10, SEG> jointPositions;
+    int i;
+    int index = -1;
+    double difference;
+    double minimumDifference = -1.0;
+
+    jointPositions.setZero();
+    for (i = 0; i < SEG; i++)
+    {
+        franka_IK_Nearest(targetRotation, targetPosition, q7Candidates(i), currentPosition, jointPositions.col(i));
+    }
+
+    for (i = 0; i < SEG; i++)
+    {
+        if (!(jointPositions(9, i) > 0)) continue;
+        difference = (currentPosition - jointPositions(Eigen::seq(0, 6), i)).norm();
+        if ((minimumDifference < 0) || (difference < minimumDifference))
+        {
+            minimumDifference = difference;
+            index = i;
+        }
+    }
+    if (index >= 0) jointPositions(7, index) = jointPositions(8, index) = width;
+    else index = 0;
+    return jointPositions.col(index);
+}
+
+PYBIND11_MODULE(franka_ik, m)
+{
+    m.doc() = "Analytical IK";
+    m.def("franka_IK_q7", &franka_IK_q7);
+    m.def("franka_IK", &franka_IK);
+    m.def("franka_IK_2", &franka_IK_2);
+}
+
 #endif // FRANKA_IK_HE_HPP
+
+// c++ -O3 -Wall -shared -std=c++11 -fPIC -I/home/user/Workspace/Franka_Analytical_IK_wrapped/eigen-3.4.0 $(python3 -m pybind11 --includes) franka_ik.cpp -o franka_ik$(python3-config --extension-suffix)
